@@ -8,10 +8,13 @@ const fs = require('fs').promises;
 const path = require('path');
 const axios = require('axios');
 const cron = require('node-cron');
+const { exec } = require('child_process');
+const util = require('util');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const execAsync = util.promisify(exec);
 
 // Middleware
 app.use(cors());
@@ -201,41 +204,250 @@ const upload = multer({
   }
 });
 
-// Helper function to extract text from different file types
-async function extractTextFromFile(filePath, fileType) {
+// ENHANCED PDF PARSING FUNCTIONS
+// File validation function
+async function validateFile(filePath, originalName) {
   try {
+    const stats = await fs.stat(filePath);
+    
+    // Check file size (max 10MB)
+    if (stats.size > 10 * 1024 * 1024) {
+      throw new Error('File size exceeds 10MB limit');
+    }
+    
+    // Check if file is empty
+    if (stats.size === 0) {
+      throw new Error('File is empty');
+    }
+    
+    // Additional file type validation based on content
+    const buffer = await fs.readFile(filePath);
+    
+    // PDF signature check
+    if (originalName.toLowerCase().endsWith('.pdf')) {
+      const pdfSignature = buffer.slice(0, 4).toString();
+      if (!pdfSignature.includes('%PDF')) {
+        throw new Error('Invalid PDF file format');
+      }
+    }
+    
+    return true;
+  } catch (error) {
+    throw new Error(`File validation failed: ${error.message}`);
+  }
+}
+
+// Enhanced PDF text extraction with multiple fallback strategies
+async function extractPDFText(filePath) {
+  const strategies = [
+    () => extractWithPdfParse(filePath),
+    () => extractWithPdfParseOptions(filePath),
+    () => extractWithPopplerUtils(filePath),
+    () => extractBasicPdfInfo(filePath)
+  ];
+
+  let lastError;
+  
+  for (const [index, strategy] of strategies.entries()) {
+    try {
+      console.log(`Trying PDF extraction strategy ${index + 1}`);
+      const result = await strategy();
+      
+      if (result && result.trim().length > 0) {
+        console.log(`PDF extraction successful with strategy ${index + 1}`);
+        return result;
+      }
+    } catch (error) {
+      console.log(`PDF extraction strategy ${index + 1} failed:`, error.message);
+      lastError = error;
+      continue;
+    }
+  }
+  
+  // If all strategies fail, return a meaningful error
+  throw new Error(`Unable to extract text from PDF. All extraction methods failed. Last error: ${lastError?.message || 'Unknown error'}`);
+}
+
+// Strategy 1: Standard pdf-parse
+async function extractWithPdfParse(filePath) {
+  const dataBuffer = await fs.readFile(filePath);
+  const data = await pdf(dataBuffer);
+  return data.text;
+}
+
+// Strategy 2: pdf-parse with custom options
+async function extractWithPdfParseOptions(filePath) {
+  const dataBuffer = await fs.readFile(filePath);
+  
+  const options = {
+    pagerender: renderPage,
+    normalizeWhitespace: true,
+    disableCombineTextItems: false,
+    max: 0, // Maximum number of pages to parse
+  };
+  
+  const data = await pdf(dataBuffer, options);
+  return data.text;
+}
+
+// Custom page render function for pdf-parse
+function renderPage(pageData) {
+  // Check if we have text items
+  if (!pageData.getTextContent) {
+    return '';
+  }
+  
+  return pageData.getTextContent().then(textContent => {
+    let lastY, text = '';
+    
+    for (let item of textContent.items) {
+      if (lastY == item.transform[5] || !lastY) {
+        text += item.str;
+      } else {
+        text += '\n' + item.str;
+      }
+      lastY = item.transform[5];
+    }
+    return text;
+  }).catch(() => '');
+}
+
+// Strategy 3: Using poppler-utils (if available on system)
+async function extractWithPopplerUtils(filePath) {
+  try {
+    const { stdout } = await execAsync(`pdftotext "${filePath}" -`);
+    return stdout;
+  } catch (error) {
+    throw new Error('Poppler utils not available or failed');
+  }
+}
+
+// Strategy 4: Basic PDF info extraction (last resort)
+async function extractBasicPdfInfo(filePath) {
+  const dataBuffer = await fs.readFile(filePath);
+  
+  // Try to extract basic info from PDF structure
+  const pdfString = dataBuffer.toString('binary');
+  
+  // Extract title and subject if available
+  let extractedText = '';
+  
+  // Look for title
+  const titleMatch = pdfString.match(/\/Title\s*\(([^)]+)\)/);
+  if (titleMatch) {
+    extractedText += `Title: ${titleMatch[1]}\n`;
+  }
+  
+  // Look for subject
+  const subjectMatch = pdfString.match(/\/Subject\s*\(([^)]+)\)/);
+  if (subjectMatch) {
+    extractedText += `Subject: ${subjectMatch[1]}\n`;
+  }
+  
+  // Look for keywords
+  const keywordsMatch = pdfString.match(/\/Keywords\s*\(([^)]+)\)/);
+  if (keywordsMatch) {
+    extractedText += `Keywords: ${keywordsMatch[1]}\n`;
+  }
+  
+  // Try to extract some readable text patterns
+  const textMatches = pdfString.match(/\(([A-Za-z0-9\s,\.]{10,})\)/g);
+  if (textMatches) {
+    const cleanText = textMatches
+      .map(match => match.slice(1, -1))
+      .filter(text => text.length > 10 && /[a-zA-Z]/.test(text))
+      .join(' ');
+    extractedText += cleanText;
+  }
+  
+  if (extractedText.trim().length === 0) {
+    throw new Error('No readable text found in PDF');
+  }
+  
+  return extractedText;
+}
+
+// Enhanced Word document extraction
+async function extractWordText(filePath) {
+  try {
+    const dataBuffer = await fs.readFile(filePath);
+    const result = await mammoth.extractRawText({ buffer: dataBuffer });
+    
+    if (!result.value || result.value.trim().length === 0) {
+      throw new Error('No text content found in document');
+    }
+    
+    return result.value;
+  } catch (error) {
+    console.error('Word extraction error:', error);
+    throw new Error(`Failed to extract text from Word document: ${error.message}`);
+  }
+}
+
+// Main text extraction function with enhanced error handling
+async function extractTextFromFile(filePath, fileType, originalName) {
+  try {
+    console.log(`Attempting to extract text from: ${filePath}, type: ${fileType}`);
+    
+    // Validate file first
+    await validateFile(filePath, originalName);
+    
+    let text;
+    
     if (fileType === 'application/pdf' || path.extname(filePath).toLowerCase() === '.pdf') {
-      const dataBuffer = await fs.readFile(filePath);
-      const data = await pdf(dataBuffer);
-      return data.text;
+      text = await extractPDFText(filePath);
     } else if (fileType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || 
                fileType === 'application/msword' || 
                path.extname(filePath).toLowerCase() === '.docx' ||
                path.extname(filePath).toLowerCase() === '.doc') {
-      const dataBuffer = await fs.readFile(filePath);
-      const result = await mammoth.extractRawText({ buffer: dataBuffer });
-      return result.value;
+      text = await extractWordText(filePath);
     } else if (fileType === 'text/plain' || path.extname(filePath).toLowerCase() === '.txt') {
-      return await fs.readFile(filePath, 'utf8');
+      text = await fs.readFile(filePath, 'utf8');
     } else {
       throw new Error('Unsupported file type');
     }
+    
+    // Validate extracted text
+    if (!text || text.trim().length === 0) {
+      throw new Error('No readable text found in the file');
+    }
+    
+    // Check if text is too short (might indicate extraction failure)
+    if (text.trim().length < 10) {
+      throw new Error('Extracted text is too short - file might be corrupted or contain only images');
+    }
+    
+    return text;
   } catch (error) {
-    console.error('Error extracting text:', error);
-    throw error;
+    console.error(`Text extraction failed for ${originalName}:`, error.message);
+    
+    // Return a user-friendly error message
+    if (error.message.includes('bad XRef entry') || error.message.includes('PDF')) {
+      throw new Error('This PDF file appears to be corrupted or uses an unsupported format. Please try converting it to a different format or using a text file instead.');
+    } else if (error.message.includes('Word') || error.message.includes('docx')) {
+      throw new Error('Unable to read this Word document. Please try saving it as a PDF or text file.');
+    } else {
+      throw new Error(`Unable to extract text from this file: ${error.message}`);
+    }
   }
 }
 
-// Gemini API helper function
+// Enhanced Gemini API helper function
 async function analyzeWithGemini(resumeText, targetRole) {
   const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AIzaSyC_6VsNFZV_jELQrwz1dF6nnmQN00RBk-U';
   const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
+
+  // Truncate very long resumes to avoid API limits
+  const maxLength = 15000;
+  const truncatedText = resumeText.length > maxLength 
+    ? resumeText.substring(0, maxLength) + '...[truncated]'
+    : resumeText;
 
   const prompt = `
     You are an expert resume analyzer and career consultant. Analyze the following resume for the target role: "${targetRole}".
     
     Resume content:
-    ${resumeText}
+    ${truncatedText}
     
     Please provide a comprehensive analysis in the following JSON format:
     {
@@ -255,6 +467,8 @@ async function analyzeWithGemini(resumeText, targetRole) {
   `;
 
   try {
+    console.log(`Sending request to Gemini API for role: ${targetRole}`);
+    
     const response = await axios.post(
       GEMINI_API_URL,
       {
@@ -266,7 +480,17 @@ async function analyzeWithGemini(resumeText, targetRole) {
         generationConfig: {
           temperature: 0.7,
           maxOutputTokens: 8192,
-        }
+        },
+        safetySettings: [
+          {
+            category: "HARM_CATEGORY_HARASSMENT",
+            threshold: "BLOCK_MEDIUM_AND_ABOVE"
+          },
+          {
+            category: "HARM_CATEGORY_HATE_SPEECH",
+            threshold: "BLOCK_MEDIUM_AND_ABOVE"
+          }
+        ]
       },
       {
         headers: {
@@ -274,9 +498,14 @@ async function analyzeWithGemini(resumeText, targetRole) {
         },
         params: {
           key: GEMINI_API_KEY
-        }
+        },
+        timeout: 30000 // 30 second timeout
       }
     );
+
+    if (!response.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+      throw new Error('Invalid response format from Gemini API');
+    }
 
     const generatedText = response.data.candidates[0].content.parts[0].text;
     
@@ -285,8 +514,24 @@ async function analyzeWithGemini(resumeText, targetRole) {
     // Remove markdown code blocks if present
     cleanedText = cleanedText.replace(/```json\n?/g, '').replace(/```\n?/g, '');
     
-    const analysis = JSON.parse(cleanedText);
-    return analysis;
+    try {
+      const analysis = JSON.parse(cleanedText);
+      
+      // Validate analysis structure and provide defaults
+      return {
+        score: analysis.score || 0,
+        atsScore: analysis.atsScore || 0,
+        strengths: Array.isArray(analysis.strengths) ? analysis.strengths : ['Analysis pending'],
+        improvements: Array.isArray(analysis.improvements) ? analysis.improvements : ['Analysis pending'],
+        keywords: Array.isArray(analysis.keywords) ? analysis.keywords : [],
+        suggestions: Array.isArray(analysis.suggestions) ? analysis.suggestions : ['Analysis pending'],
+        rewrittenResume: analysis.rewrittenResume || 'Enhanced resume will be generated',
+        coverLetter: analysis.coverLetter || 'Cover letter will be generated'
+      };
+    } catch (parseError) {
+      console.error('JSON parse error:', parseError);
+      throw new Error('Invalid response format from AI service');
+    }
   } catch (error) {
     console.error('Gemini API error:', error.response?.data || error.message);
     throw new Error('Failed to analyze resume with AI');
@@ -409,23 +654,76 @@ app.post('/api/analyze/text', async (req, res) => {
   }
 });
 
+// Enhanced file analysis route
 app.post('/api/analyze/file', upload.single('resume'), async (req, res) => {
+  let filePath = null;
+  
   try {
     if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
+      return res.status(400).json({ 
+        error: 'No file uploaded',
+        details: 'Please select a file to upload'
+      });
     }
     
+    filePath = req.file.path;
     const { targetRole, userId } = req.body;
     
     if (!targetRole || !userId) {
-      return res.status(400).json({ error: 'Missing required fields' });
+      return res.status(400).json({ 
+        error: 'Missing required fields',
+        details: 'Target role and user ID are required'
+      });
     }
     
-    // Extract text from file
-    const resumeText = await extractTextFromFile(req.file.path, req.file.mimetype);
+    console.log(`Processing file: ${req.file.originalname}, size: ${req.file.size} bytes, type: ${req.file.mimetype}`);
+    
+    // Extract text from file with enhanced error handling
+    let resumeText;
+    try {
+      resumeText = await extractTextFromFile(filePath, req.file.mimetype, req.file.originalname);
+    } catch (extractionError) {
+      console.error('Text extraction failed:', extractionError.message);
+      return res.status(400).json({
+        error: 'File processing failed',
+        details: extractionError.message,
+        suggestions: [
+          'Try converting your PDF to a text file',
+          'Ensure your PDF is not password protected',
+          'Check that your file is not corrupted',
+          'Try using a different file format (DOCX, TXT)'
+        ]
+      });
+    }
+    
+    // Validate extracted text quality
+    if (resumeText.length < 50) {
+      return res.status(400).json({
+        error: 'Insufficient content',
+        details: 'The extracted text is too short. This might indicate that your file contains mostly images or is corrupted.',
+        extractedLength: resumeText.length,
+        suggestions: [
+          'Ensure your resume contains readable text, not just images',
+          'Try copying and pasting your resume text instead',
+          'Convert image-based PDFs to text-based format'
+        ]
+      });
+    }
+    
+    console.log(`Successfully extracted ${resumeText.length} characters from ${req.file.originalname}`);
     
     // Analyze with Gemini
-    const analysis = await analyzeWithGemini(resumeText, targetRole);
+    let analysis;
+    try {
+      analysis = await analyzeWithGemini(resumeText, targetRole);
+    } catch (analysisError) {
+      console.error('Gemini analysis failed:', analysisError.message);
+      return res.status(500).json({
+        error: 'AI analysis failed',
+        details: 'Unable to analyze your resume at the moment. Please try again later.',
+        extractedText: resumeText.substring(0, 200) + '...' // Show first 200 chars for debugging
+      });
+    }
     
     // Save analysis to database
     const savedAnalysis = new Analysis({
@@ -436,36 +734,65 @@ app.post('/api/analyze/file', upload.single('resume'), async (req, res) => {
       resumeText,
       score: analysis.score,
       analysis: {
-        strengths: analysis.strengths,
-        improvements: analysis.improvements,
-        keywords: analysis.keywords,
-        atsScore: analysis.atsScore,
-        suggestions: analysis.suggestions,
+        strengths: analysis.strengths || [],
+        improvements: analysis.improvements || [],
+        keywords: analysis.keywords || [],
+        atsScore: analysis.atsScore || 0,
+        suggestions: analysis.suggestions || [],
       },
-      rewrittenResume: analysis.rewrittenResume,
-      coverLetter: analysis.coverLetter,
+      rewrittenResume: analysis.rewrittenResume || '',
+      coverLetter: analysis.coverLetter || '',
     });
     
     await savedAnalysis.save();
-    
-    // Clean up uploaded file
-    await fs.unlink(req.file.path);
+    console.log(`Analysis saved with ID: ${savedAnalysis._id}`);
     
     res.json({
       success: true,
       analysisId: savedAnalysis._id,
+      fileName: req.file.originalname,
+      extractedLength: resumeText.length,
       score: analysis.score,
       analysis: savedAnalysis.analysis,
       rewrittenResume: analysis.rewrittenResume,
       coverLetter: analysis.coverLetter,
     });
+    
   } catch (error) {
     console.error('File analysis error:', error);
-    // Clean up file on error
-    if (req.file?.path) {
-      await fs.unlink(req.file.path).catch(() => {});
+    
+    // Determine error type and provide appropriate response
+    let errorMessage = 'Failed to analyze resume';
+    let errorDetails = error.message;
+    let statusCode = 500;
+    
+    if (error.message.includes('PDF') || error.message.includes('corrupted')) {
+      statusCode = 400;
+      errorMessage = 'File format issue';
+      errorDetails = 'Unable to process this file. Please try a different format or ensure the file is not corrupted.';
+    } else if (error.message.includes('Gemini') || error.message.includes('AI')) {
+      statusCode = 503;
+      errorMessage = 'AI service temporarily unavailable';
+      errorDetails = 'Please try again in a few moments.';
     }
-    res.status(500).json({ error: 'Failed to analyze resume' });
+    
+    res.status(statusCode).json({ 
+      error: errorMessage,
+      details: errorDetails,
+      fileName: req.file?.originalname,
+      timestamp: new Date().toISOString()
+    });
+    
+  } finally {
+    // Always clean up uploaded file
+    if (filePath) {
+      try {
+        await fs.unlink(filePath);
+        console.log(`Cleaned up file: ${filePath}`);
+      } catch (cleanupError) {
+        console.error('File cleanup error:', cleanupError.message);
+      }
+    }
   }
 });
 
@@ -722,7 +1049,9 @@ app.get('/', (req, res) => {
   res.json({
     message: 'Smart Resume Analyzer Backend Server',
     apiEndpoint: '/api',
-    status: 'running'
+    status: 'running',
+    version: '2.0.0',
+    features: ['Enhanced PDF Processing', 'Multiple Extraction Strategies', 'Better Error Handling']
   });
 });
 
@@ -730,7 +1059,7 @@ app.get('/', (req, res) => {
 app.get('/api', (req, res) => {
   res.json({
     message: 'Smart Resume Analyzer API',
-    version: '1.0.0',
+    version: '2.0.0',
     endpoints: {
       health: 'GET /api/health',
       users: {
@@ -747,7 +1076,8 @@ app.get('/api', (req, res) => {
       },
       download: {
         resume: 'GET /api/download/resume/:analysisId',
-        coverLetter: 'GET /api/download/coverletter/:analysisId'
+        coverLetter: 'GET /api/download/coverletter/:analysisId',
+        report: 'GET /api/download/report/:analysisId'
       },
       stats: 'GET /api/stats/:userId'
     }
@@ -787,6 +1117,8 @@ app.get('/api/health', async (req, res) => {
         }
       },
       uptime: process.uptime(),
+      version: '2.0.0',
+      features: ['Enhanced PDF Processing', 'Multiple Extraction Strategies', 'Better Error Handling']
     });
   } catch (error) {
     console.error('Health check error:', error);
@@ -907,7 +1239,7 @@ app.use((error, req, res, next) => {
 const server = app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   
-  // Start cron job after server starts
+  // Start cron jobs after server starts
   startCronJobs();
 });
 
