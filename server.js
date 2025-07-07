@@ -17,13 +17,114 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// MongoDB connection
-mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://cvmaster:cvmaster@cluster0.x4mwoog.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0', {
+// MongoDB connection with initialization
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://cvmaster121:cvmaster121@cluster0.lfu8e4d.mongodb.net/cvmaster?retryWrites=true&w=majority&appName=Cluster0';
+
+mongoose.connect(MONGODB_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
 })
-.then(() => console.log('MongoDB connected successfully'))
-.catch(err => console.error('MongoDB connection error:', err));
+.then(async () => {
+  console.log('MongoDB connected successfully');
+  console.log('Database name:', mongoose.connection.name);
+  
+  // Initialize database and collections
+  await initializeDatabase();
+})
+.catch(err => {
+  console.error('MongoDB connection error:', err);
+  process.exit(1);
+});
+
+// Function to initialize database and ensure collections exist
+async function initializeDatabase() {
+  try {
+    // Force database creation by creating a document
+    const db = mongoose.connection.db;
+    
+    // Check if the database exists by trying to get stats
+    const admin = db.admin();
+    const databases = await admin.listDatabases();
+    const dbExists = databases.databases.some(d => d.name === 'cvmaster');
+    
+    if (!dbExists) {
+      console.log('Database does not exist. Creating...');
+      
+      // Create a temporary document to force database creation
+      const tempCollection = db.collection('_temp');
+      await tempCollection.insertOne({ init: true, createdAt: new Date() });
+      await tempCollection.drop();
+      console.log('Database created successfully');
+    } else {
+      console.log('Database already exists');
+    }
+    
+    // Check if collections exist
+    const collections = await db.listCollections().toArray();
+    console.log('Existing collections:', collections.map(c => c.name));
+    
+    // Ensure models are registered and collections exist
+    const modelsToInit = [
+      { model: User, name: 'users' },
+      { model: Analysis, name: 'analyses' }
+    ];
+    
+    for (const { model, name } of modelsToInit) {
+      const exists = collections.some(c => c.name === name);
+      if (!exists) {
+        // Create collection by creating and deleting a document
+        const doc = new model({
+          _id: new mongoose.Types.ObjectId(),
+          ...(name === 'users' ? {
+            clerkId: '_init_temp',
+            email: 'init@temp.com',
+          } : {
+            userId: '_init_temp',
+            fileName: '_init',
+            fileType: 'text',
+            targetRole: '_init',
+            resumeText: '_init',
+            score: 0,
+          })
+        });
+        
+        await doc.save();
+        await model.deleteOne({ _id: doc._id });
+        console.log(`Created collection: ${name}`);
+      } else {
+        console.log(`Collection already exists: ${name}`);
+      }
+    }
+    
+    // Create indexes for better performance
+    await createIndexes();
+    
+    console.log('Database initialization complete');
+  } catch (error) {
+    console.error('Database initialization error:', error);
+    // Don't exit on initialization error, just log it
+  }
+}
+
+// Function to create indexes
+async function createIndexes() {
+  try {
+    // User indexes
+    await User.collection.createIndex({ clerkId: 1 }, { unique: true });
+    await User.collection.createIndex({ email: 1 });
+    console.log('User indexes created');
+    
+    // Analysis indexes
+    await Analysis.collection.createIndex({ userId: 1 });
+    await Analysis.collection.createIndex({ createdAt: -1 });
+    await Analysis.collection.createIndex({ userId: 1, createdAt: -1 });
+    await Analysis.collection.createIndex({ targetRole: 1 });
+    await Analysis.collection.createIndex({ score: -1 });
+    console.log('Analysis indexes created');
+  } catch (error) {
+    console.error('Error creating indexes:', error);
+  }
+}
 
 // Schemas
 const userSchema = new mongoose.Schema({
@@ -424,9 +525,9 @@ app.get('/api/download/resume/:analysisId', async (req, res) => {
       return res.status(404).json({ error: 'No rewritten resume available' });
     }
     
-    const filename = `resume-${analysis.targetRole.replace(/\s+/g, '-')}-enhanced.md`;
+    const filename = `resume-${analysis.targetRole.replace(/\s+/g, '-')}-enhanced.txt`;
     
-    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Length', Buffer.byteLength(analysis.rewrittenResume, 'utf8'));
     res.send(analysis.rewrittenResume);
@@ -449,9 +550,9 @@ app.get('/api/download/coverletter/:analysisId', async (req, res) => {
       return res.status(404).json({ error: 'No cover letter available' });
     }
     
-    const filename = `cover-letter-${analysis.targetRole.replace(/\s+/g, '-')}.md`;
+    const filename = `cover-letter-${analysis.targetRole.replace(/\s+/g, '-')}.txt`;
     
-    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Length', Buffer.byteLength(analysis.coverLetter, 'utf8'));
     res.send(analysis.coverLetter);
@@ -471,40 +572,48 @@ app.get('/api/download/report/:analysisId', async (req, res) => {
     }
     
     // Create a comprehensive report
-    const report = `# Resume Analysis Report
+    const report = `RESUME ANALYSIS REPORT
+======================
 
-## Analysis Details
-- **Date:** ${new Date(analysis.createdAt).toLocaleDateString()}
-- **Target Role:** ${analysis.targetRole}
-- **Overall Score:** ${analysis.score}/100
-- **ATS Score:** ${analysis.analysis.atsScore || 'N/A'}/100
+ANALYSIS DETAILS
+----------------
+Date: ${new Date(analysis.createdAt).toLocaleDateString()}
+Target Role: ${analysis.targetRole}
+Overall Score: ${analysis.score}/100
+ATS Score: ${analysis.analysis.atsScore || 'N/A'}/100
 
-## Strengths
-${analysis.analysis.strengths?.map(s => `- ${s}`).join('\n') || 'No strengths identified'}
+STRENGTHS
+---------
+${analysis.analysis.strengths?.map(s => `• ${s}`).join('\n') || 'No strengths identified'}
 
-## Areas for Improvement
-${analysis.analysis.improvements?.map(i => `- ${i}`).join('\n') || 'No improvements identified'}
+AREAS FOR IMPROVEMENT
+--------------------
+${analysis.analysis.improvements?.map(i => `• ${i}`).join('\n') || 'No improvements identified'}
 
-## Key Keywords
+KEY KEYWORDS
+------------
 ${analysis.analysis.keywords?.join(', ') || 'No keywords identified'}
 
-## Recommendations
-${analysis.analysis.suggestions?.map(s => `- ${s}`).join('\n') || 'No suggestions provided'}
+RECOMMENDATIONS
+---------------
+${analysis.analysis.suggestions?.map(s => `• ${s}`).join('\n') || 'No suggestions provided'}
 
----
+============================================================
 
-## Enhanced Resume
+ENHANCED RESUME
+===============
 ${analysis.rewrittenResume || 'No enhanced resume available'}
 
----
+============================================================
 
-## Cover Letter
+COVER LETTER
+============
 ${analysis.coverLetter || 'No cover letter available'}
 `;
     
-    const filename = `analysis-report-${analysis.targetRole.replace(/\s+/g, '-')}.md`;
+    const filename = `analysis-report-${analysis.targetRole.replace(/\s+/g, '-')}.txt`;
     
-    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Length', Buffer.byteLength(report, 'utf8'));
     res.send(report);
@@ -551,6 +660,62 @@ app.get('/api/stats/:userId', async (req, res) => {
   }
 });
 
+// Manual database initialization endpoint
+app.post('/api/init-db', async (req, res) => {
+  try {
+    // Check if already connected
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(500).json({ error: 'Database not connected' });
+    }
+    
+    const db = mongoose.connection.db;
+    
+    // Force create collections by inserting and removing a document
+    const collections = ['users', 'analyses'];
+    const results = [];
+    
+    for (const collName of collections) {
+      try {
+        const coll = db.collection(collName);
+        
+        // Insert a temporary document
+        const result = await coll.insertOne({ 
+          _temp: true, 
+          createdAt: new Date(),
+          _id: new mongoose.Types.ObjectId()
+        });
+        
+        // Remove the temporary document
+        await coll.deleteOne({ _id: result.insertedId });
+        
+        results.push({ collection: collName, status: 'created' });
+      } catch (error) {
+        results.push({ collection: collName, status: 'error', error: error.message });
+      }
+    }
+    
+    // Create indexes
+    await createIndexes();
+    
+    // Get final collection list
+    const finalCollections = await db.listCollections().toArray();
+    
+    res.json({
+      success: true,
+      database: mongoose.connection.name || 'cvmaster',
+      results,
+      collections: finalCollections.map(c => c.name),
+      indexes: {
+        users: await User.collection.indexes(),
+        analyses: await Analysis.collection.indexes()
+      }
+    });
+  } catch (error) {
+    console.error('Init DB error:', error);
+    res.status(500).json({ error: 'Failed to initialize database', details: error.message });
+  }
+});
+
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({
@@ -588,9 +753,138 @@ app.get('/api', (req, res) => {
   });
 });
 
-// Health check
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+// Health check with database status
+app.get('/api/health', async (req, res) => {
+  try {
+    // Check MongoDB connection
+    const dbState = mongoose.connection.readyState;
+    const dbStatus = {
+      0: 'disconnected',
+      1: 'connected',
+      2: 'connecting',
+      3: 'disconnecting',
+    };
+    
+    // Get collection counts
+    let userCount = 0;
+    let analysisCount = 0;
+    
+    if (dbState === 1) {
+      userCount = await User.countDocuments();
+      analysisCount = await Analysis.countDocuments();
+    }
+    
+    res.json({ 
+      status: 'ok', 
+      timestamp: new Date().toISOString(),
+      database: {
+        status: dbStatus[dbState],
+        name: mongoose.connection.name || 'cvmaster',
+        collections: {
+          users: userCount,
+          analyses: analysisCount,
+        }
+      },
+      uptime: process.uptime(),
+    });
+  } catch (error) {
+    console.error('Health check error:', error);
+    res.status(500).json({ 
+      status: 'error', 
+      timestamp: new Date().toISOString(),
+      error: error.message 
+    });
+  }
+});
+
+// Database reset endpoint (for development only)
+app.post('/api/reset-db', async (req, res) => {
+  try {
+    // Only allow in development
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(403).json({ error: 'Database reset not allowed in production' });
+    }
+    
+    // Drop all collections
+    await User.deleteMany({});
+    await Analysis.deleteMany({});
+    
+    console.log('Database reset complete');
+    
+    res.json({ 
+      success: true, 
+      message: 'Database reset successfully',
+      collections: {
+        users: await User.countDocuments(),
+        analyses: await Analysis.countDocuments(),
+      }
+    });
+  } catch (error) {
+    console.error('Reset error:', error);
+    res.status(500).json({ error: 'Failed to reset database' });
+  }
+});
+
+// Seed data endpoint (for testing - remove in production)
+app.post('/api/seed', async (req, res) => {
+  try {
+    // Only allow in development
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(403).json({ error: 'Seeding not allowed in production' });
+    }
+    
+    // Create a test user
+    const testUser = await User.findOneAndUpdate(
+      { clerkId: 'test_user_123' },
+      {
+        clerkId: 'test_user_123',
+        email: 'test@example.com',
+        firstName: 'Test',
+        lastName: 'User',
+        profile: {
+          jobTitle: 'Software Engineer',
+          company: 'Tech Corp',
+          location: 'San Francisco, CA',
+        },
+      },
+      { upsert: true, new: true }
+    );
+    
+    console.log('Test user created:', testUser._id);
+    
+    // Create sample analyses
+    const sampleAnalyses = [
+      {
+        userId: 'test_user_123',
+        fileName: 'john_doe_resume.pdf',
+        fileType: 'file',
+        targetRole: 'Senior Developer',
+        resumeText: 'Sample resume content...',
+        score: 85,
+        analysis: {
+          strengths: ['Strong technical skills', 'Good project experience'],
+          improvements: ['Add more quantifiable achievements'],
+          keywords: ['JavaScript', 'React', 'Node.js'],
+          atsScore: 82,
+          suggestions: ['Include more action verbs'],
+        },
+        rewrittenResume: '# Enhanced Resume\n\nSample enhanced content...',
+        coverLetter: '# Cover Letter\n\nDear Hiring Manager...',
+      },
+    ];
+    
+    await Analysis.insertMany(sampleAnalyses);
+    
+    res.json({ 
+      success: true, 
+      message: 'Seed data created successfully',
+      user: testUser,
+      analysesCreated: sampleAnalyses.length,
+    });
+  } catch (error) {
+    console.error('Seed error:', error);
+    res.status(500).json({ error: 'Failed to seed data' });
+  }
 });
 
 // Error handling middleware
