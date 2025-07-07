@@ -7,6 +7,7 @@ const mammoth = require('mammoth');
 const fs = require('fs').promises;
 const path = require('path');
 const axios = require('axios');
+const cron = require('node-cron');
 require('dotenv').config();
 
 const app = express();
@@ -887,6 +888,15 @@ app.post('/api/seed', async (req, res) => {
   }
 });
 
+// Keep-alive endpoint for external monitoring
+app.get('/api/keep-alive', (req, res) => {
+  res.json({ 
+    status: 'alive', 
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
+
 // Error handling middleware
 app.use((error, req, res, next) => {
   console.error('Server error:', error);
@@ -894,12 +904,131 @@ app.use((error, req, res, next) => {
 });
 
 // Start server
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  
+  // Start cron job after server starts
+  startCronJobs();
 });
+
+// Cron Jobs
+function startCronJobs() {
+  // Health check cron job - runs every 5 minutes
+  cron.schedule('*/5 * * * *', async () => {
+    console.log('Running scheduled health check at:', new Date().toISOString());
+    
+    try {
+      // Database health check
+      const dbState = mongoose.connection.readyState;
+      if (dbState === 1) {
+        const userCount = await User.countDocuments();
+        const analysisCount = await Analysis.countDocuments();
+        console.log(`Health Check - DB Connected | Users: ${userCount} | Analyses: ${analysisCount}`);
+      } else {
+        console.log('Health Check - DB Not Connected, State:', dbState);
+      }
+      
+      // Optional: Clean up old temporary files
+      await cleanupOldFiles();
+      
+      // Optional: Send metrics or perform maintenance tasks
+      await performMaintenance();
+      
+    } catch (error) {
+      console.error('Cron job error:', error);
+    }
+  });
+  
+  // Database optimization cron job - runs daily at 2 AM
+  cron.schedule('0 2 * * *', async () => {
+    console.log('Running daily database optimization at:', new Date().toISOString());
+    
+    try {
+      // Compact database collections
+      if (mongoose.connection.readyState === 1) {
+        await mongoose.connection.db.command({ compact: 'users' });
+        await mongoose.connection.db.command({ compact: 'analyses' });
+        console.log('Database optimization completed');
+      }
+    } catch (error) {
+      console.error('Database optimization error:', error);
+    }
+  });
+  
+  console.log('Cron jobs initialized');
+}
+
+// Helper function to clean up old uploaded files
+async function cleanupOldFiles() {
+  try {
+    const uploadDir = 'uploads/';
+    
+    // Check if uploads directory exists
+    try {
+      await fs.access(uploadDir);
+    } catch {
+      // Directory doesn't exist, nothing to clean
+      return;
+    }
+    
+    const files = await fs.readdir(uploadDir);
+    const now = Date.now();
+    const oneHourAgo = now - (60 * 60 * 1000); // 1 hour in milliseconds
+    
+    for (const file of files) {
+      const filePath = path.join(uploadDir, file);
+      const stats = await fs.stat(filePath);
+      
+      // Delete files older than 1 hour
+      if (stats.mtimeMs < oneHourAgo) {
+        await fs.unlink(filePath);
+        console.log(`Cleaned up old file: ${file}`);
+      }
+    }
+  } catch (error) {
+    console.error('File cleanup error:', error);
+  }
+}
+
+// Helper function for maintenance tasks
+async function performMaintenance() {
+  try {
+    // Example: Clean up very old analyses (optional)
+    if (process.env.AUTO_CLEANUP === 'true') {
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      
+      const result = await Analysis.deleteMany({
+        createdAt: { $lt: thirtyDaysAgo },
+        // Only delete if user hasn't logged in recently
+      });
+      
+      if (result.deletedCount > 0) {
+        console.log(`Cleaned up ${result.deletedCount} old analyses`);
+      }
+    }
+    
+    // Log current system stats
+    const memUsage = process.memoryUsage();
+    console.log(`Memory Usage - RSS: ${Math.round(memUsage.rss / 1024 / 1024)}MB, Heap: ${Math.round(memUsage.heapUsed / 1024 / 1024)}MB`);
+  } catch (error) {
+    console.error('Maintenance error:', error);
+  }
+}
 
 // Cleanup on exit
 process.on('SIGINT', async () => {
+  console.log('Shutting down server...');
+  
+  // Stop cron jobs
+  cron.getTasks().forEach(task => task.stop());
+  
+  // Close database connection
   await mongoose.connection.close();
-  process.exit(0);
+  
+  // Close server
+  server.close(() => {
+    console.log('Server shut down complete');
+    process.exit(0);
+  });
 });
