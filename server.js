@@ -70,7 +70,8 @@ async function initializeDatabase() {
     // Ensure models are registered and collections exist
     const modelsToInit = [
       { model: User, name: 'users' },
-      { model: Analysis, name: 'analyses' }
+      { model: Analysis, name: 'analyses' },
+      { model: Comment, name: 'comments' } // Add comments collection
     ];
     
     for (const { model, name } of modelsToInit) {
@@ -82,13 +83,17 @@ async function initializeDatabase() {
           ...(name === 'users' ? {
             clerkId: '_init_temp',
             email: 'init@temp.com',
-          } : {
+          } : name === 'analyses' ? {
             userId: '_init_temp',
             fileName: '_init',
             fileType: 'text',
             targetRole: '_init',
             resumeText: '_init',
             score: 0,
+          } : {
+            userId: '_init_temp',
+            content: '_init',
+            userName: '_init',
           })
         });
         
@@ -125,6 +130,12 @@ async function createIndexes() {
     await Analysis.collection.createIndex({ targetRole: 1 });
     await Analysis.collection.createIndex({ score: -1 });
     console.log('Analysis indexes created');
+    
+    // Comment indexes
+    await Comment.collection.createIndex({ createdAt: -1 });
+    await Comment.collection.createIndex({ userId: 1 });
+    await Comment.collection.createIndex({ userId: 1, createdAt: -1 });
+    console.log('Comment indexes created');
   } catch (error) {
     console.error('Error creating indexes:', error);
   }
@@ -172,8 +183,19 @@ const analysisSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
 });
 
+// NEW: Comment schema
+const commentSchema = new mongoose.Schema({
+  userId: { type: String, required: true },
+  userName: { type: String, required: true },
+  userEmail: { type: String, required: true },
+  content: { type: String, required: true, maxlength: 1000 },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now },
+});
+
 const User = mongoose.model('User', userSchema);
 const Analysis = mongoose.model('Analysis', analysisSchema);
+const Comment = mongoose.model('Comment', commentSchema);
 
 // Multer configuration for file uploads
 const storage = multer.diskStorage({
@@ -607,6 +629,186 @@ app.put('/api/users/:clerkId/profile', async (req, res) => {
   }
 });
 
+// NEW: Comment routes
+app.post('/api/comments', async (req, res) => {
+  try {
+    const { userId, userName, userEmail, content } = req.body;
+    
+    if (!userId || !userName || !content) {
+      return res.status(400).json({ error: 'User ID, name, and content are required' });
+    }
+    
+    // Validate content length
+    if (content.length > 1000) {
+      return res.status(400).json({ error: 'Comment cannot exceed 1000 characters' });
+    }
+    
+    // Validate content is not empty after trimming
+    if (content.trim().length === 0) {
+      return res.status(400).json({ error: 'Comment cannot be empty' });
+    }
+    
+    // Validate userName is not empty
+    if (userName.trim().length === 0) {
+      return res.status(400).json({ error: 'User name cannot be empty' });
+    }
+    
+    const comment = new Comment({
+      userId,
+      userName: userName.trim(),
+      userEmail: userEmail || 'guest@example.com',
+      content: content.trim(),
+    });
+    
+    await comment.save();
+    
+    res.json({ success: true, comment });
+  } catch (error) {
+    console.error('Create comment error:', error);
+    res.status(500).json({ error: 'Failed to create comment' });
+  }
+});
+
+app.get('/api/comments', async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+    
+    const comments = await Comment.find()
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .select('-userEmail'); // Don't expose email addresses
+    
+    const total = await Comment.countDocuments();
+    
+    res.json({
+      comments,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    });
+  } catch (error) {
+    console.error('Get comments error:', error);
+    res.status(500).json({ error: 'Failed to get comments' });
+  }
+});
+
+app.get('/api/comments/user/:userId', async (req, res) => {
+  try {
+    const comments = await Comment.find({ userId: req.params.userId })
+      .sort({ createdAt: -1 })
+      .limit(20);
+    
+    res.json(comments);
+  } catch (error) {
+    console.error('Get user comments error:', error);
+    res.status(500).json({ error: 'Failed to get user comments' });
+  }
+});
+
+app.put('/api/comments/:commentId', async (req, res) => {
+  try {
+    const { content, userId } = req.body;
+    
+    if (!content || content.trim().length === 0) {
+      return res.status(400).json({ error: 'Comment cannot be empty' });
+    }
+    
+    if (content.length > 1000) {
+      return res.status(400).json({ error: 'Comment cannot exceed 1000 characters' });
+    }
+    
+    const comment = await Comment.findOneAndUpdate(
+      { _id: req.params.commentId, userId }, // Only allow user to update their own comment
+      {
+        content: content.trim(),
+        updatedAt: new Date(),
+      },
+      { new: true }
+    );
+    
+    if (!comment) {
+      return res.status(404).json({ error: 'Comment not found or unauthorized' });
+    }
+    
+    res.json({ success: true, comment });
+  } catch (error) {
+    console.error('Update comment error:', error);
+    res.status(500).json({ error: 'Failed to update comment' });
+  }
+});
+
+app.delete('/api/comments/:commentId', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    
+    const comment = await Comment.findOneAndDelete({
+      _id: req.params.commentId,
+      userId, // Only allow user to delete their own comment
+    });
+    
+    if (!comment) {
+      return res.status(404).json({ error: 'Comment not found or unauthorized' });
+    }
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete comment error:', error);
+    res.status(500).json({ error: 'Failed to delete comment' });
+  }
+});
+
+// NEW: Get recent comments for landing page
+app.get('/api/comments/recent', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 5;
+    
+    const comments = await Comment.find()
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .select('-userEmail');
+    
+    res.json({ comments });
+  } catch (error) {
+    console.error('Get recent comments error:', error);
+    res.status(500).json({ error: 'Failed to get recent comments' });
+  }
+});
+
+// NEW: Get comment statistics
+app.get('/api/comments/stats', async (req, res) => {
+  try {
+    const totalComments = await Comment.countDocuments();
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    
+    const todayComments = await Comment.countDocuments({
+      createdAt: { $gte: todayStart }
+    });
+    
+    const weekStart = new Date();
+    weekStart.setDate(weekStart.getDate() - 7);
+    
+    const weekComments = await Comment.countDocuments({
+      createdAt: { $gte: weekStart }
+    });
+    
+    res.json({
+      total: totalComments,
+      today: todayComments,
+      thisWeek: weekComments,
+    });
+  } catch (error) {
+    console.error('Get comment stats error:', error);
+    res.status(500).json({ error: 'Failed to get comment statistics' });
+  }
+});
+
 // Analysis routes
 app.post('/api/analyze/text', async (req, res) => {
   try {
@@ -999,7 +1201,7 @@ app.post('/api/init-db', async (req, res) => {
     const db = mongoose.connection.db;
     
     // Force create collections by inserting and removing a document
-    const collections = ['users', 'analyses'];
+    const collections = ['users', 'analyses', 'comments'];
     const results = [];
     
     for (const collName of collections) {
@@ -1035,7 +1237,8 @@ app.post('/api/init-db', async (req, res) => {
       collections: finalCollections.map(c => c.name),
       indexes: {
         users: await User.collection.indexes(),
-        analyses: await Analysis.collection.indexes()
+        analyses: await Analysis.collection.indexes(),
+        comments: await Comment.collection.indexes()
       }
     });
   } catch (error) {
@@ -1050,8 +1253,8 @@ app.get('/', (req, res) => {
     message: 'Smart Resume Analyzer Backend Server',
     apiEndpoint: '/api',
     status: 'running',
-    version: '2.0.0',
-    features: ['Enhanced PDF Processing', 'Multiple Extraction Strategies', 'Better Error Handling']
+    version: '2.1.0',
+    features: ['Enhanced PDF Processing', 'Multiple Extraction Strategies', 'Better Error Handling', 'Comment System']
   });
 });
 
@@ -1059,13 +1262,20 @@ app.get('/', (req, res) => {
 app.get('/api', (req, res) => {
   res.json({
     message: 'Smart Resume Analyzer API',
-    version: '2.0.0',
+    version: '2.1.0',
     endpoints: {
       health: 'GET /api/health',
       users: {
         sync: 'POST /api/users/sync',
         get: 'GET /api/users/:clerkId',
         updateProfile: 'PUT /api/users/:clerkId/profile'
+      },
+      comments: {
+        create: 'POST /api/comments',
+        getAll: 'GET /api/comments',
+        getUserComments: 'GET /api/comments/user/:userId',
+        update: 'PUT /api/comments/:commentId',
+        delete: 'DELETE /api/comments/:commentId'
       },
       analysis: {
         analyzeText: 'POST /api/analyze/text',
@@ -1099,10 +1309,12 @@ app.get('/api/health', async (req, res) => {
     // Get collection counts
     let userCount = 0;
     let analysisCount = 0;
+    let commentCount = 0;
     
     if (dbState === 1) {
       userCount = await User.countDocuments();
       analysisCount = await Analysis.countDocuments();
+      commentCount = await Comment.countDocuments();
     }
     
     res.json({ 
@@ -1114,11 +1326,12 @@ app.get('/api/health', async (req, res) => {
         collections: {
           users: userCount,
           analyses: analysisCount,
+          comments: commentCount,
         }
       },
       uptime: process.uptime(),
-      version: '2.0.0',
-      features: ['Enhanced PDF Processing', 'Multiple Extraction Strategies', 'Better Error Handling']
+      version: '2.1.0',
+      features: ['Enhanced PDF Processing', 'Multiple Extraction Strategies', 'Better Error Handling', 'Comment System']
     });
   } catch (error) {
     console.error('Health check error:', error);
@@ -1141,6 +1354,7 @@ app.post('/api/reset-db', async (req, res) => {
     // Drop all collections
     await User.deleteMany({});
     await Analysis.deleteMany({});
+    await Comment.deleteMany({});
     
     console.log('Database reset complete');
     
@@ -1150,6 +1364,7 @@ app.post('/api/reset-db', async (req, res) => {
       collections: {
         users: await User.countDocuments(),
         analyses: await Analysis.countDocuments(),
+        comments: await Comment.countDocuments(),
       }
     });
   } catch (error) {
@@ -1208,11 +1423,30 @@ app.post('/api/seed', async (req, res) => {
     
     await Analysis.insertMany(sampleAnalyses);
     
+    // Create sample comments
+    const sampleComments = [
+      {
+        userId: 'test_user_123',
+        userName: 'Test User',
+        userEmail: 'test@example.com',
+        content: 'This resume analyzer is amazing! It helped me improve my resume significantly.',
+      },
+      {
+        userId: 'test_user_456',
+        userName: 'Jane Doe',
+        userEmail: 'jane@example.com',
+        content: 'Great tool for job seekers. The ATS optimization feature is particularly helpful.',
+      },
+    ];
+    
+    await Comment.insertMany(sampleComments);
+    
     res.json({ 
       success: true, 
       message: 'Seed data created successfully',
       user: testUser,
       analysesCreated: sampleAnalyses.length,
+      commentsCreated: sampleComments.length,
     });
   } catch (error) {
     console.error('Seed error:', error);
@@ -1255,7 +1489,8 @@ function startCronJobs() {
       if (dbState === 1) {
         const userCount = await User.countDocuments();
         const analysisCount = await Analysis.countDocuments();
-        console.log(`Health Check - DB Connected | Users: ${userCount} | Analyses: ${analysisCount}`);
+        const commentCount = await Comment.countDocuments();
+        console.log(`Health Check - DB Connected | Users: ${userCount} | Analyses: ${analysisCount} | Comments: ${commentCount}`);
       } else {
         console.log('Health Check - DB Not Connected, State:', dbState);
       }
@@ -1280,6 +1515,7 @@ function startCronJobs() {
       if (mongoose.connection.readyState === 1) {
         await mongoose.connection.db.command({ compact: 'users' });
         await mongoose.connection.db.command({ compact: 'analyses' });
+        await mongoose.connection.db.command({ compact: 'comments' });
         console.log('Database optimization completed');
       }
     } catch (error) {
