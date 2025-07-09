@@ -634,8 +634,8 @@ app.post('/api/comments', async (req, res) => {
   try {
     const { userId, userName, userEmail, content } = req.body;
     
-    if (!userId || !userName || !content) {
-      return res.status(400).json({ error: 'User ID, name, and content are required' });
+    if (!userId || !userName || !userEmail || !content) {
+      return res.status(400).json({ error: 'All fields are required' });
     }
     
     // Validate content length
@@ -648,15 +648,10 @@ app.post('/api/comments', async (req, res) => {
       return res.status(400).json({ error: 'Comment cannot be empty' });
     }
     
-    // Validate userName is not empty
-    if (userName.trim().length === 0) {
-      return res.status(400).json({ error: 'User name cannot be empty' });
-    }
-    
     const comment = new Comment({
       userId,
-      userName: userName.trim(),
-      userEmail: userEmail || 'guest@example.com',
+      userName,
+      userEmail,
       content: content.trim(),
     });
     
@@ -760,52 +755,6 @@ app.delete('/api/comments/:commentId', async (req, res) => {
   } catch (error) {
     console.error('Delete comment error:', error);
     res.status(500).json({ error: 'Failed to delete comment' });
-  }
-});
-
-// NEW: Get recent comments for landing page
-app.get('/api/comments/recent', async (req, res) => {
-  try {
-    const limit = parseInt(req.query.limit) || 5;
-    
-    const comments = await Comment.find()
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .select('-userEmail');
-    
-    res.json({ comments });
-  } catch (error) {
-    console.error('Get recent comments error:', error);
-    res.status(500).json({ error: 'Failed to get recent comments' });
-  }
-});
-
-// NEW: Get comment statistics
-app.get('/api/comments/stats', async (req, res) => {
-  try {
-    const totalComments = await Comment.countDocuments();
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-    
-    const todayComments = await Comment.countDocuments({
-      createdAt: { $gte: todayStart }
-    });
-    
-    const weekStart = new Date();
-    weekStart.setDate(weekStart.getDate() - 7);
-    
-    const weekComments = await Comment.countDocuments({
-      createdAt: { $gte: weekStart }
-    });
-    
-    res.json({
-      total: totalComments,
-      today: todayComments,
-      thisWeek: weekComments,
-    });
-  } catch (error) {
-    console.error('Get comment stats error:', error);
-    res.status(500).json({ error: 'Failed to get comment statistics' });
   }
 });
 
