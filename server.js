@@ -1203,7 +1203,7 @@ app.get('/', (req, res) => {
     apiEndpoint: '/api',
     status: 'running',
     version: '2.1.0',
-    features: ['Enhanced PDF Processing', 'Multiple Extraction Strategies', 'Better Error Handling', 'Comment System']
+    features: ['Enhanced PDF Processing', 'Multiple Extraction Strategies', 'Better Error Handling', 'Comment System', '50-Second Monitoring']
   });
 });
 
@@ -1280,7 +1280,7 @@ app.get('/api/health', async (req, res) => {
       },
       uptime: process.uptime(),
       version: '2.1.0',
-      features: ['Enhanced PDF Processing', 'Multiple Extraction Strategies', 'Better Error Handling', 'Comment System']
+      features: ['Enhanced PDF Processing', 'Multiple Extraction Strategies', 'Better Error Handling', 'Comment System', '50-Second Monitoring']
     });
   } catch (error) {
     console.error('Health check error:', error);
@@ -1426,8 +1426,49 @@ const server = app.listen(PORT, () => {
   startCronJobs();
 });
 
-// Cron Jobs
+// ENHANCED Cron Jobs with 50-second monitoring
 function startCronJobs() {
+  // NEW: 50-second monitoring cron job
+  cron.schedule('*/50 * * * * *', async () => {
+    const timestamp = new Date().toISOString();
+    console.log(`[50s Monitor] System check at: ${timestamp}`);
+    
+    try {
+      // Quick system status check
+      const memUsage = process.memoryUsage();
+      const memUsedMB = Math.round(memUsage.heapUsed / 1024 / 1024);
+      const memTotalMB = Math.round(memUsage.heapTotal / 1024 / 1024);
+      
+      // Database connection check
+      const dbState = mongoose.connection.readyState;
+      const dbStatusMap = { 0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting' };
+      
+      // Log system metrics
+      console.log(`[50s Monitor] Memory: ${memUsedMB}MB/${memTotalMB}MB | DB: ${dbStatusMap[dbState]} | Uptime: ${Math.round(process.uptime())}s`);
+      
+      // Check for any critical issues
+      if (memUsedMB > 500) { // Alert if memory usage exceeds 500MB
+        console.warn(`[50s Monitor] WARNING: High memory usage detected: ${memUsedMB}MB`);
+      }
+      
+      if (dbState !== 1) { // Alert if database is not connected
+        console.error(`[50s Monitor] ERROR: Database connection issue - State: ${dbStatusMap[dbState]}`);
+      }
+      
+      // Optional: Perform lightweight cleanup
+      if (global.gc && memUsedMB > 200) {
+        global.gc(); // Force garbage collection if available and memory usage is high
+        console.log(`[50s Monitor] Garbage collection triggered`);
+      }
+      
+      // Check for stuck uploads (files older than 10 minutes)
+      await quickFileCleanup();
+      
+    } catch (error) {
+      console.error(`[50s Monitor] Error during system check:`, error.message);
+    }
+  });
+  
   // Health check cron job - runs every 5 minutes
   cron.schedule('*/5 * * * *', async () => {
     console.log('Running scheduled health check at:', new Date().toISOString());
@@ -1472,7 +1513,44 @@ function startCronJobs() {
     }
   });
   
-  console.log('Cron jobs initialized');
+  console.log('Cron jobs initialized (including 50-second monitoring)');
+}
+
+// NEW: Quick file cleanup function for 50-second monitoring
+async function quickFileCleanup() {
+  try {
+    const uploadDir = 'uploads/';
+    
+    // Check if uploads directory exists
+    try {
+      await fs.access(uploadDir);
+    } catch {
+      // Directory doesn't exist, nothing to clean
+      return;
+    }
+    
+    const files = await fs.readdir(uploadDir);
+    const now = Date.now();
+    const tenMinutesAgo = now - (10 * 60 * 1000); // 10 minutes in milliseconds
+    let cleanedCount = 0;
+    
+    for (const file of files) {
+      const filePath = path.join(uploadDir, file);
+      const stats = await fs.stat(filePath);
+      
+      // Delete files older than 10 minutes (stuck uploads)
+      if (stats.mtimeMs < tenMinutesAgo) {
+        await fs.unlink(filePath);
+        cleanedCount++;
+      }
+    }
+    
+    if (cleanedCount > 0) {
+      console.log(`[50s Monitor] Cleaned up ${cleanedCount} stuck upload files`);
+    }
+  } catch (error) {
+    // Silently ignore cleanup errors in the 50s monitor
+  }
 }
 
 // Helper function to clean up old uploaded files
