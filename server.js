@@ -29,14 +29,9 @@ mongoose.connect(MONGODB_URI, {
   useUnifiedTopology: true,
 })
 .then(async () => {
-  console.log('MongoDB connected successfully');
-  console.log('Database name:', mongoose.connection.name);
-  
-  // Initialize database and collections
   await initializeDatabase();
 })
 .catch(err => {
-  console.error('MongoDB connection error:', err);
   process.exit(1);
 });
 
@@ -52,20 +47,14 @@ async function initializeDatabase() {
     const dbExists = databases.databases.some(d => d.name === 'cvmaster');
     
     if (!dbExists) {
-      console.log('Database does not exist. Creating...');
-      
       // Create a temporary document to force database creation
       const tempCollection = db.collection('_temp');
       await tempCollection.insertOne({ init: true, createdAt: new Date() });
       await tempCollection.drop();
-      console.log('Database created successfully');
-    } else {
-      console.log('Database already exists');
     }
     
     // Check if collections exist
     const collections = await db.listCollections().toArray();
-    console.log('Existing collections:', collections.map(c => c.name));
     
     // Ensure models are registered and collections exist
     const modelsToInit = [
@@ -99,18 +88,13 @@ async function initializeDatabase() {
         
         await doc.save();
         await model.deleteOne({ _id: doc._id });
-        console.log(`Created collection: ${name}`);
-      } else {
-        console.log(`Collection already exists: ${name}`);
       }
     }
     
     // Create indexes for better performance
     await createIndexes();
     
-    console.log('Database initialization complete');
   } catch (error) {
-    console.error('Database initialization error:', error);
     // Don't exit on initialization error, just log it
   }
 }
@@ -121,7 +105,6 @@ async function createIndexes() {
     // User indexes
     await User.collection.createIndex({ clerkId: 1 }, { unique: true });
     await User.collection.createIndex({ email: 1 });
-    console.log('User indexes created');
     
     // Analysis indexes
     await Analysis.collection.createIndex({ userId: 1 });
@@ -129,15 +112,13 @@ async function createIndexes() {
     await Analysis.collection.createIndex({ userId: 1, createdAt: -1 });
     await Analysis.collection.createIndex({ targetRole: 1 });
     await Analysis.collection.createIndex({ score: -1 });
-    console.log('Analysis indexes created');
     
     // Comment indexes
     await Comment.collection.createIndex({ createdAt: -1 });
     await Comment.collection.createIndex({ userId: 1 });
     await Comment.collection.createIndex({ userId: 1, createdAt: -1 });
-    console.log('Comment indexes created');
   } catch (error) {
-    console.error('Error creating indexes:', error);
+    // Handle error silently
   }
 }
 
@@ -272,15 +253,12 @@ async function extractPDFText(filePath) {
   
   for (const [index, strategy] of strategies.entries()) {
     try {
-      console.log(`Trying PDF extraction strategy ${index + 1}`);
       const result = await strategy();
       
       if (result && result.trim().length > 0) {
-        console.log(`PDF extraction successful with strategy ${index + 1}`);
         return result;
       }
     } catch (error) {
-      console.log(`PDF extraction strategy ${index + 1} failed:`, error.message);
       lastError = error;
       continue;
     }
@@ -401,7 +379,6 @@ async function extractWordText(filePath) {
     
     return result.value;
   } catch (error) {
-    console.error('Word extraction error:', error);
     throw new Error(`Failed to extract text from Word document: ${error.message}`);
   }
 }
@@ -409,8 +386,6 @@ async function extractWordText(filePath) {
 // Main text extraction function with enhanced error handling
 async function extractTextFromFile(filePath, fileType, originalName) {
   try {
-    console.log(`Attempting to extract text from: ${filePath}, type: ${fileType}`);
-    
     // Validate file first
     await validateFile(filePath, originalName);
     
@@ -441,8 +416,6 @@ async function extractTextFromFile(filePath, fileType, originalName) {
     
     return text;
   } catch (error) {
-    console.error(`Text extraction failed for ${originalName}:`, error.message);
-    
     // Return a user-friendly error message
     if (error.message.includes('bad XRef entry') || error.message.includes('PDF')) {
       throw new Error('This PDF file appears to be corrupted or uses an unsupported format. Please try converting it to a different format or using a text file instead.');
@@ -489,8 +462,6 @@ async function analyzeWithGemini(resumeText, targetRole) {
   `;
 
   try {
-    console.log(`Sending request to Gemini API for role: ${targetRole}`);
-    
     const response = await axios.post(
       GEMINI_API_URL,
       {
@@ -551,11 +522,9 @@ async function analyzeWithGemini(resumeText, targetRole) {
         coverLetter: analysis.coverLetter || 'Cover letter will be generated'
       };
     } catch (parseError) {
-      console.error('JSON parse error:', parseError);
       throw new Error('Invalid response format from AI service');
     }
   } catch (error) {
-    console.error('Gemini API error:', error.response?.data || error.message);
     throw new Error('Failed to analyze resume with AI');
   }
 }
@@ -586,7 +555,6 @@ app.post('/api/users/sync', async (req, res) => {
     await user.save();
     res.json({ success: true, user });
   } catch (error) {
-    console.error('User sync error:', error);
     res.status(500).json({ error: 'Failed to sync user' });
   }
 });
@@ -599,7 +567,6 @@ app.get('/api/users/:clerkId', async (req, res) => {
     }
     res.json(user);
   } catch (error) {
-    console.error('Get user error:', error);
     res.status(500).json({ error: 'Failed to get user' });
   }
 });
@@ -624,7 +591,6 @@ app.put('/api/users/:clerkId/profile', async (req, res) => {
     
     res.json(user);
   } catch (error) {
-    console.error('Update profile error:', error);
     res.status(500).json({ error: 'Failed to update profile' });
   }
 });
@@ -659,7 +625,6 @@ app.post('/api/comments', async (req, res) => {
     
     res.json({ success: true, comment });
   } catch (error) {
-    console.error('Create comment error:', error);
     res.status(500).json({ error: 'Failed to create comment' });
   }
 });
@@ -688,7 +653,6 @@ app.get('/api/comments', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Get comments error:', error);
     res.status(500).json({ error: 'Failed to get comments' });
   }
 });
@@ -701,7 +665,6 @@ app.get('/api/comments/user/:userId', async (req, res) => {
     
     res.json(comments);
   } catch (error) {
-    console.error('Get user comments error:', error);
     res.status(500).json({ error: 'Failed to get user comments' });
   }
 });
@@ -733,7 +696,6 @@ app.put('/api/comments/:commentId', async (req, res) => {
     
     res.json({ success: true, comment });
   } catch (error) {
-    console.error('Update comment error:', error);
     res.status(500).json({ error: 'Failed to update comment' });
   }
 });
@@ -753,7 +715,6 @@ app.delete('/api/comments/:commentId', async (req, res) => {
     
     res.json({ success: true });
   } catch (error) {
-    console.error('Delete comment error:', error);
     res.status(500).json({ error: 'Failed to delete comment' });
   }
 });
@@ -800,7 +761,6 @@ app.post('/api/analyze/text', async (req, res) => {
       coverLetter: analysis.coverLetter,
     });
   } catch (error) {
-    console.error('Text analysis error:', error);
     res.status(500).json({ error: 'Failed to analyze resume' });
   }
 });
@@ -827,14 +787,11 @@ app.post('/api/analyze/file', upload.single('resume'), async (req, res) => {
       });
     }
     
-    console.log(`Processing file: ${req.file.originalname}, size: ${req.file.size} bytes, type: ${req.file.mimetype}`);
-    
     // Extract text from file with enhanced error handling
     let resumeText;
     try {
       resumeText = await extractTextFromFile(filePath, req.file.mimetype, req.file.originalname);
     } catch (extractionError) {
-      console.error('Text extraction failed:', extractionError.message);
       return res.status(400).json({
         error: 'File processing failed',
         details: extractionError.message,
@@ -861,14 +818,11 @@ app.post('/api/analyze/file', upload.single('resume'), async (req, res) => {
       });
     }
     
-    console.log(`Successfully extracted ${resumeText.length} characters from ${req.file.originalname}`);
-    
     // Analyze with Gemini
     let analysis;
     try {
       analysis = await analyzeWithGemini(resumeText, targetRole);
     } catch (analysisError) {
-      console.error('Gemini analysis failed:', analysisError.message);
       return res.status(500).json({
         error: 'AI analysis failed',
         details: 'Unable to analyze your resume at the moment. Please try again later.',
@@ -896,7 +850,6 @@ app.post('/api/analyze/file', upload.single('resume'), async (req, res) => {
     });
     
     await savedAnalysis.save();
-    console.log(`Analysis saved with ID: ${savedAnalysis._id}`);
     
     res.json({
       success: true,
@@ -910,8 +863,6 @@ app.post('/api/analyze/file', upload.single('resume'), async (req, res) => {
     });
     
   } catch (error) {
-    console.error('File analysis error:', error);
-    
     // Determine error type and provide appropriate response
     let errorMessage = 'Failed to analyze resume';
     let errorDetails = error.message;
@@ -939,9 +890,8 @@ app.post('/api/analyze/file', upload.single('resume'), async (req, res) => {
     if (filePath) {
       try {
         await fs.unlink(filePath);
-        console.log(`Cleaned up file: ${filePath}`);
       } catch (cleanupError) {
-        console.error('File cleanup error:', cleanupError.message);
+        // Handle cleanup error silently
       }
     }
   }
@@ -955,7 +905,6 @@ app.get('/api/analyses/:userId', async (req, res) => {
     
     res.json(analyses);
   } catch (error) {
-    console.error('Get analyses error:', error);
     res.status(500).json({ error: 'Failed to get analyses' });
   }
 });
@@ -970,7 +919,6 @@ app.get('/api/analysis/:analysisId', async (req, res) => {
     
     res.json(analysis);
   } catch (error) {
-    console.error('Get analysis error:', error);
     res.status(500).json({ error: 'Failed to get analysis' });
   }
 });
@@ -985,7 +933,6 @@ app.delete('/api/analysis/:analysisId', async (req, res) => {
     
     res.json({ success: true });
   } catch (error) {
-    console.error('Delete analysis error:', error);
     res.status(500).json({ error: 'Failed to delete analysis' });
   }
 });
@@ -1011,7 +958,6 @@ app.get('/api/download/resume/:analysisId', async (req, res) => {
     res.setHeader('Content-Length', Buffer.byteLength(analysis.rewrittenResume, 'utf8'));
     res.send(analysis.rewrittenResume);
   } catch (error) {
-    console.error('Download resume error:', error);
     res.status(500).json({ error: 'Failed to download resume' });
   }
 });
@@ -1036,7 +982,6 @@ app.get('/api/download/coverletter/:analysisId', async (req, res) => {
     res.setHeader('Content-Length', Buffer.byteLength(analysis.coverLetter, 'utf8'));
     res.send(analysis.coverLetter);
   } catch (error) {
-    console.error('Download cover letter error:', error);
     res.status(500).json({ error: 'Failed to download cover letter' });
   }
 });
@@ -1097,7 +1042,6 @@ ${analysis.coverLetter || 'No cover letter available'}
     res.setHeader('Content-Length', Buffer.byteLength(report, 'utf8'));
     res.send(report);
   } catch (error) {
-    console.error('Download report error:', error);
     res.status(500).json({ error: 'Failed to download report' });
   }
 });
@@ -1134,7 +1078,6 @@ app.get('/api/stats/:userId', async (req, res) => {
       })),
     });
   } catch (error) {
-    console.error('Get stats error:', error);
     res.status(500).json({ error: 'Failed to get statistics' });
   }
 });
@@ -1191,7 +1134,6 @@ app.post('/api/init-db', async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Init DB error:', error);
     res.status(500).json({ error: 'Failed to initialize database', details: error.message });
   }
 });
@@ -1283,7 +1225,6 @@ app.get('/api/health', async (req, res) => {
       features: ['Enhanced PDF Processing', 'Multiple Extraction Strategies', 'Better Error Handling', 'Comment System', '50-Second Monitoring']
     });
   } catch (error) {
-    console.error('Health check error:', error);
     res.status(500).json({ 
       status: 'error', 
       timestamp: new Date().toISOString(),
@@ -1305,8 +1246,6 @@ app.post('/api/reset-db', async (req, res) => {
     await Analysis.deleteMany({});
     await Comment.deleteMany({});
     
-    console.log('Database reset complete');
-    
     res.json({ 
       success: true, 
       message: 'Database reset successfully',
@@ -1317,7 +1256,6 @@ app.post('/api/reset-db', async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Reset error:', error);
     res.status(500).json({ error: 'Failed to reset database' });
   }
 });
@@ -1346,8 +1284,6 @@ app.post('/api/seed', async (req, res) => {
       },
       { upsert: true, new: true }
     );
-    
-    console.log('Test user created:', testUser._id);
     
     // Create sample analyses
     const sampleAnalyses = [
@@ -1398,7 +1334,6 @@ app.post('/api/seed', async (req, res) => {
       commentsCreated: sampleComments.length,
     });
   } catch (error) {
-    console.error('Seed error:', error);
     res.status(500).json({ error: 'Failed to seed data' });
   }
 });
@@ -1414,14 +1349,11 @@ app.get('/api/keep-alive', (req, res) => {
 
 // Error handling middleware
 app.use((error, req, res, next) => {
-  console.error('Server error:', error);
   res.status(500).json({ error: error.message || 'Internal server error' });
 });
 
 // Start server
 const server = app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  
   // Start cron jobs after server starts
   startCronJobs();
 });
@@ -1431,7 +1363,6 @@ function startCronJobs() {
   // NEW: 50-second monitoring cron job
   cron.schedule('*/50 * * * * *', async () => {
     const timestamp = new Date().toISOString();
-    console.log(`[50s Monitor] System check at: ${timestamp}`);
     
     try {
       // Quick system status check
@@ -1443,36 +1374,21 @@ function startCronJobs() {
       const dbState = mongoose.connection.readyState;
       const dbStatusMap = { 0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting' };
       
-      // Log system metrics
-      console.log(`[50s Monitor] Memory: ${memUsedMB}MB/${memTotalMB}MB | DB: ${dbStatusMap[dbState]} | Uptime: ${Math.round(process.uptime())}s`);
-      
-      // Check for any critical issues
-      if (memUsedMB > 500) { // Alert if memory usage exceeds 500MB
-        console.warn(`[50s Monitor] WARNING: High memory usage detected: ${memUsedMB}MB`);
-      }
-      
-      if (dbState !== 1) { // Alert if database is not connected
-        console.error(`[50s Monitor] ERROR: Database connection issue - State: ${dbStatusMap[dbState]}`);
-      }
-      
       // Optional: Perform lightweight cleanup
       if (global.gc && memUsedMB > 200) {
         global.gc(); // Force garbage collection if available and memory usage is high
-        console.log(`[50s Monitor] Garbage collection triggered`);
       }
       
       // Check for stuck uploads (files older than 10 minutes)
       await quickFileCleanup();
       
     } catch (error) {
-      console.error(`[50s Monitor] Error during system check:`, error.message);
+      // Handle error silently
     }
   });
   
   // Health check cron job - runs every 5 minutes
   cron.schedule('*/5 * * * *', async () => {
-    console.log('Running scheduled health check at:', new Date().toISOString());
-    
     try {
       // Database health check
       const dbState = mongoose.connection.readyState;
@@ -1480,9 +1396,6 @@ function startCronJobs() {
         const userCount = await User.countDocuments();
         const analysisCount = await Analysis.countDocuments();
         const commentCount = await Comment.countDocuments();
-        console.log(`Health Check - DB Connected | Users: ${userCount} | Analyses: ${analysisCount} | Comments: ${commentCount}`);
-      } else {
-        console.log('Health Check - DB Not Connected, State:', dbState);
       }
       
       // Optional: Clean up old temporary files
@@ -1492,28 +1405,23 @@ function startCronJobs() {
       await performMaintenance();
       
     } catch (error) {
-      console.error('Cron job error:', error);
+      // Handle error silently
     }
   });
   
   // Database optimization cron job - runs daily at 2 AM
   cron.schedule('0 2 * * *', async () => {
-    console.log('Running daily database optimization at:', new Date().toISOString());
-    
     try {
       // Compact database collections
       if (mongoose.connection.readyState === 1) {
         await mongoose.connection.db.command({ compact: 'users' });
         await mongoose.connection.db.command({ compact: 'analyses' });
         await mongoose.connection.db.command({ compact: 'comments' });
-        console.log('Database optimization completed');
       }
     } catch (error) {
-      console.error('Database optimization error:', error);
+      // Handle error silently
     }
   });
-  
-  console.log('Cron jobs initialized (including 50-second monitoring)');
 }
 
 // NEW: Quick file cleanup function for 50-second monitoring
@@ -1545,9 +1453,6 @@ async function quickFileCleanup() {
       }
     }
     
-    if (cleanedCount > 0) {
-      console.log(`[50s Monitor] Cleaned up ${cleanedCount} stuck upload files`);
-    }
   } catch (error) {
     // Silently ignore cleanup errors in the 50s monitor
   }
@@ -1577,11 +1482,10 @@ async function cleanupOldFiles() {
       // Delete files older than 1 hour
       if (stats.mtimeMs < oneHourAgo) {
         await fs.unlink(filePath);
-        console.log(`Cleaned up old file: ${file}`);
       }
     }
   } catch (error) {
-    console.error('File cleanup error:', error);
+    // Handle error silently
   }
 }
 
@@ -1597,24 +1501,17 @@ async function performMaintenance() {
         createdAt: { $lt: thirtyDaysAgo },
         // Only delete if user hasn't logged in recently
       });
-      
-      if (result.deletedCount > 0) {
-        console.log(`Cleaned up ${result.deletedCount} old analyses`);
-      }
     }
     
     // Log current system stats
     const memUsage = process.memoryUsage();
-    console.log(`Memory Usage - RSS: ${Math.round(memUsage.rss / 1024 / 1024)}MB, Heap: ${Math.round(memUsage.heapUsed / 1024 / 1024)}MB`);
   } catch (error) {
-    console.error('Maintenance error:', error);
+    // Handle error silently
   }
 }
 
 // Cleanup on exit
 process.on('SIGINT', async () => {
-  console.log('Shutting down server...');
-  
   // Stop cron jobs
   cron.getTasks().forEach(task => task.stop());
   
@@ -1623,7 +1520,6 @@ process.on('SIGINT', async () => {
   
   // Close server
   server.close(() => {
-    console.log('Server shut down complete');
     process.exit(0);
   });
 });
